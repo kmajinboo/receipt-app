@@ -108,6 +108,16 @@ nav button .ic{font-size:21px}
 .muted{color:var(--sub);font-size:13px}
 .hidden{display:none!important}
 img.preview{width:100%;border-radius:12px;max-height:190px;object-fit:cover;margin-bottom:14px}
+.shot-strip{display:flex;gap:8px;overflow-x:auto;padding-bottom:4px}
+.shot{position:relative;flex-shrink:0}
+.shot img{width:88px;height:118px;object-fit:cover;border-radius:9px;
+  border:1.5px solid var(--border);display:block}
+.shot-no{position:absolute;left:5px;top:5px;background:rgba(0,0,0,.65);color:#fff;
+  font-size:11px;font-weight:700;width:19px;height:19px;border-radius:50%;
+  display:flex;align-items:center;justify-content:center}
+.shot-del{position:absolute;right:4px;top:4px;background:rgba(0,0,0,.65);color:#fff;
+  border:none;border-radius:50%;width:20px;height:20px;font-size:14px;line-height:1;
+  padding:0;display:flex;align-items:center;justify-content:center}
 .filters{display:flex;gap:7px;margin-bottom:14px}
 .filters select{flex:1}
 .filters button{background:var(--primary-l);color:var(--primary);border:none;
@@ -174,11 +184,26 @@ img.preview{width:100%;border-radius:12px;max-height:190px;object-fit:cover;marg
         <input id="cam" type="file" accept="image/*" capture="environment" class="hidden">
         <input id="fil" type="file" accept="image/*" class="hidden">
       </div>
+
+      <!-- 撮影済みサムネイル -->
+      <div id="shotsWrap" class="card hidden" style="margin-top:12px">
+        <div class="card-title">撮影済み（<span id="shotCount">0</span>枚）</div>
+        <div id="shotStrip" class="shot-strip"></div>
+        <p class="muted" style="font-size:12px;margin:10px 0 4px">
+          長いレシートは上から順に分けて撮影すると、まとめて1件として読み取ります。
+        </p>
+        <button id="addMoreBtn" class="add" onclick="document.getElementById('cam').click()">
+          ＋ 続きを撮影する
+        </button>
+        <button class="btn-block" onclick="runOcr()" style="margin-top:10px">
+          🔍 読み取りを開始
+        </button>
+      </div>
     </section>
 
     <!-- 確認 -->
     <section id="scReview" class="hidden">
-      <img id="preview" class="preview hidden" alt="">
+      <div id="reviewShots" class="shot-strip" style="margin-bottom:14px"></div>
       <div class="card">
         <div class="card-title">基本情報</div>
         <div class="field"><label>日付</label><input id="fDate" type="date"></div>
@@ -261,6 +286,7 @@ function api(action, params){
 var USER = null;
 var TOKEN = null;
 var items = [];
+var shots = [];   // 撮影した画像（複数枚）
 var summaryRows = [];
 var tab = 'upload';
 
@@ -410,36 +436,95 @@ function handleFail(e){
   showAlert('err', e.message);
 }
 
-// ── 画像選択 ──
+// ── 画像選択（複数枚対応） ──
+var MAX_SHOTS = 4;
+
 ['cam','fil'].forEach(function(id){
   document.getElementById(id).addEventListener('change', function(e){
     var f = e.target.files[0];
-    if(f) handleFile(f);
+    if(f) addShot(f);
     e.target.value = '';
   });
 });
 
-function handleFile(file){
+/**
+ * 撮影した画像をリストに追加する（まだ送信はしない）
+ */
+function addShot(file){
   if(file.size > 8 * 1024 * 1024){
     showAlert('err','画像サイズが大きすぎます（8MB以下にしてください）'); return;
   }
-  var img = document.getElementById('preview');
-  img.src = URL.createObjectURL(file);
-  img.classList.remove('hidden');
+  if(shots.length >= MAX_SHOTS){
+    showAlert('err','画像は' + MAX_SHOTS + '枚までです'); return;
+  }
 
-  showAlert('load','OCR解析中…');
+  clearAlert();
   var reader = new FileReader();
   reader.onload = function(){
-    var b64 = reader.result.split(',')[1];
-    api('ocr', { token: TOKEN, image: b64 })
-      .then(onOcr)
-      .catch(handleFail);
+    shots.push({
+      id: Math.random().toString(36).slice(2),
+      b64: reader.result.split(',')[1],
+      url: reader.result
+    });
+    renderShots();
   };
   reader.readAsDataURL(file);
 }
 
+function removeShot(id){
+  shots = shots.filter(function(s){ return s.id !== id; });
+  renderShots();
+}
+
+/**
+ * 撮影済みサムネイルの描画
+ */
+function renderShots(){
+  var wrap = document.getElementById('shotsWrap');
+  var strip = document.getElementById('shotStrip');
+
+  if(!shots.length){
+    wrap.classList.add('hidden');
+    return;
+  }
+
+  wrap.classList.remove('hidden');
+  strip.innerHTML = shots.map(function(s, i){
+    return '<div class="shot">' +
+      '<img src="' + s.url + '" alt="">' +
+      '<span class="shot-no">' + (i + 1) + '</span>' +
+      '<button class="shot-del" onclick="removeShot(\'' + s.id + '\')">×</button>' +
+      '</div>';
+  }).join('');
+
+  document.getElementById('shotCount').textContent = shots.length;
+  document.getElementById('addMoreBtn').classList.toggle('hidden', shots.length >= MAX_SHOTS);
+}
+
+/**
+ * 撮影した画像をまとめてOCRにかける
+ */
+function runOcr(){
+  if(!shots.length){ showAlert('err','画像を撮影してください'); return; }
+
+  showAlert('load', shots.length > 1
+    ? shots.length + '枚をまとめて解析中…'
+    : 'OCR解析中…');
+
+  api('ocr', { token: TOKEN, images: shots.map(function(s){ return s.b64; }) })
+    .then(onOcr)
+    .catch(handleFail);
+}
+
 function onOcr(r){
   clearAlert();
+
+  // 確認画面に撮影済み画像を表示
+  document.getElementById('reviewShots').innerHTML = shots.map(function(s, i){
+    return '<div class="shot"><img src="' + s.url + '" alt="">' +
+           '<span class="shot-no">' + (i + 1) + '</span></div>';
+  }).join('');
+
   document.getElementById('fDate').value = r.date;
   document.getElementById('fStore').value = r.store;
   document.getElementById('fCat').value = r.category;
@@ -645,7 +730,9 @@ function switchTab(t){
 
 function toUpload(){
   items = [];
-  document.getElementById('preview').classList.add('hidden');
+  shots = [];
+  renderShots();
+  document.getElementById('reviewShots').innerHTML = '';
   document.getElementById('fStore').value = '';
   clearAlert();
   show('scUpload');
