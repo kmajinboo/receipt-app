@@ -208,6 +208,8 @@ img.preview{width:100%;border-radius:12px;max-height:190px;object-fit:cover;marg
         <div class="card-title">基本情報</div>
         <div class="field"><label>日付</label><input id="fDate" type="date"></div>
         <div class="field"><label>店名</label><input id="fStore" type="text" placeholder="店名を入力"></div>
+        <div class="field"><label>相談者ID</label><input id="fTarget" type="text" placeholder="例：C-0123" list="targetList"></div>
+        <datalist id="targetList"></datalist>
         <div class="field"><label>カテゴリ</label><select id="fCat"></select></div>
         <div class="field hidden" id="deptPickWrap">
           <label>登録先の部署</label><select id="fDept"></select>
@@ -243,6 +245,11 @@ img.preview{width:100%;border-radius:12px;max-height:190px;object-fit:cover;marg
         <select id="fMonth" onchange="renderSummary()"></select>
         <select id="fScope" onchange="loadSummary()"></select>
         <button onclick="loadSummary()">↻</button>
+      </div>
+      <div class="filters">
+        <select id="fTargetFilter" onchange="renderSummary()">
+          <option value="">相談者ID：全員</option>
+        </select>
       </div>
       <div id="summaryBody"></div>
     </section>
@@ -405,6 +412,11 @@ function startApp(u){
     scope.innerHTML = '<option value="'+esc(u.department)+'">'+esc(u.department)+'</option>';
     scope.disabled = true;
   }
+
+  // 相談者IDの入力候補を裏で取得しておく（登録画面で使う）
+  api('summary', { token: TOKEN, department: u.isAdmin ? '__ALL__' : u.department })
+    .then(function(r){ summaryRows = r.rows; updateTargetSuggestions(); })
+    .catch(function(){ /* 候補が取れなくても致命的ではないので無視 */ });
 }
 
 function clearToken(){
@@ -588,7 +600,9 @@ function addItem(){
 // ── 保存 ──
 function save(){
   var date = document.getElementById('fDate').value;
+  var target = document.getElementById('fTarget').value.trim();
   if(!date){ showAlert('err','日付を入力してください'); return; }
+  if(!target){ showAlert('err','相談者IDを入力してください'); return; }
   if(!items.some(function(it){ return it.name; })){
     showAlert('err','品目を1つ以上入力してください'); return;
   }
@@ -598,6 +612,7 @@ function save(){
     payload: {
       date: date,
       store: document.getElementById('fStore').value,
+      target: target,
       category: document.getElementById('fCat').value,
       department: USER.isAdmin ? document.getElementById('fDept').value : null,
       items: items
@@ -621,8 +636,18 @@ function loadSummary(){
       summaryRows = r.rows;
       buildMonths();
       renderSummary();
+      updateTargetSuggestions();
     })
     .catch(handleFail);
+}
+
+/**
+ * 過去に入力された相談者IDを、登録画面の入力候補として使えるようにする
+ */
+function updateTargetSuggestions(){
+  var names = uniq(summaryRows.map(function(r){ return r.target; }).filter(Boolean)).sort();
+  var list = document.getElementById('targetList');
+  if(list) list.innerHTML = names.map(function(n){ return '<option value="'+esc(n)+'">'; }).join('');
 }
 
 function buildMonths(){
@@ -640,20 +665,41 @@ function buildMonths(){
 
 function renderSummary(){
   var month = document.getElementById('fMonth').value;
-  var rows = summaryRows.filter(function(r){ return r.date.slice(0,7) === month; });
+  var monthRows = summaryRows.filter(function(r){ return r.date.slice(0,7) === month; });
+
+  // 相談者IDフィルタの選択肢を更新（月内に登場するIDのみ）
+  var targetSel = document.getElementById('fTargetFilter');
+  var targets = uniq(monthRows.map(function(r){ return r.target; }).filter(Boolean)).sort();
+  var curTarget = targetSel.value;
+  targetSel.innerHTML = '<option value="">相談者ID：全員</option>' +
+    targets.map(function(t){ return '<option value="'+esc(t)+'">'+esc(t)+'</option>'; }).join('');
+  if(targets.indexOf(curTarget) >= 0) targetSel.value = curTarget;
+  var selectedTarget = targetSel.value;
+
+  var rows = selectedTarget
+    ? monthRows.filter(function(r){ return r.target === selectedTarget; })
+    : monthRows;
+
   var total = rows.reduce(function(s,r){ return s + r.subtotal; }, 0);
-  var receipts = uniq(rows.map(function(r){ return r.date + r.store + r.department; })).length;
+  var receipts = uniq(rows.map(function(r){ return r.date + r.store + r.department + r.target; })).length;
 
   var html = '<div class="card">' +
-    '<div class="stat-sub">' + month.replace('-','年') + '月 合計</div>' +
+    '<div class="stat-sub">' + month.replace('-','年') + '月' +
+    (selectedTarget ? '　' + esc(selectedTarget) : '') + ' 合計</div>' +
     '<div class="big">' + yen(total) + '</div>' +
     '<div class="stat-sub">' + rows.length + '品目 ／ ' + receipts + '件のレシート</div></div>';
 
-  // 部署別（全部署表示時のみ）
-  if(document.getElementById('fScope').value === '__ALL__'){
-    html += groupCard('部署別', rows, 'department');
+  if(selectedTarget){
+    // 相談者IDを選んでいる時は、その人のカテゴリ別内訳を表示
+    html += barCard(esc(selectedTarget) + ' の内訳', rows);
+  } else {
+    // 相談者ID未選択時は、部署別（全部署表示時のみ）→相談者ID別→カテゴリ別
+    if(document.getElementById('fScope').value === '__ALL__'){
+      html += groupCard('部署別', rows, 'department');
+    }
+    html += groupCard('相談者ID別', rows, 'target');
+    html += barCard('カテゴリ別内訳', rows);
   }
-  html += barCard('カテゴリ別内訳', rows);
   html += groupCard('登録者別', rows, 'user');
   html += recentCard(rows);
 
@@ -708,7 +754,8 @@ function recentCard(rows){
     var c = CAT_COLOR[r.category] || CAT_COLOR['その他'];
     return '<div class="list-row"><div style="flex:1;min-width:0">' +
       '<div class="ellip" style="font-size:13px;font-weight:600">'+esc(r.item||'—')+'</div>' +
-      '<div class="muted" style="font-size:11px">'+esc(r.date)+'　'+esc(r.store)+'</div></div>' +
+      '<div class="muted" style="font-size:11px">'+esc(r.date)+'　'+esc(r.store)+
+      (r.target ? '　｜　'+esc(r.target) : '')+'</div></div>' +
       '<div style="text-align:right;flex-shrink:0;margin-left:8px">' +
       '<div style="font-size:14px;font-weight:700">'+yen(r.subtotal)+'</div>' +
       (r.category ? '<span class="tag" style="background:'+c[0]+';color:'+c[1]+'">'+esc(r.category)+'</span>' : '') +
@@ -734,6 +781,7 @@ function toUpload(){
   renderShots();
   document.getElementById('reviewShots').innerHTML = '';
   document.getElementById('fStore').value = '';
+  document.getElementById('fTarget').value = '';
   clearAlert();
   show('scUpload');
 }
